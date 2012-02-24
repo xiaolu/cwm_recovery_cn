@@ -1,0 +1,3 @@
+Clockworkmod recovery 5.0.2.8 Chinese font support.
+Config:
+RECOVERY_USE_CHINESE_FONT := true
