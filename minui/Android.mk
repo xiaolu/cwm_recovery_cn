@@ -6,9 +6,9 @@ ifneq ($(BOARD_CUSTOM_GRAPHICS),)
   LOCAL_SRC_FILES += $(BOARD_CUSTOM_GRAPHICS)
 else
 ifeq ($(RECOVERY_USE_CHINESE_FONT), true)
-  LOCAL_SRC_FILES += graphics.c
+  LOCAL_SRC_FILES += graphics_cn.c
 else
-  LOCAL_SRC_FILES += graphics_en.c
+  LOCAL_SRC_FILES += graphics.c
 endif
 endif
 
