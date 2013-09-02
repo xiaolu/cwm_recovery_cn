@@ -1,4 +1,4 @@
-/*
+ /*
  * Copyright (C) 2007 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,7 +17,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <unistd.h>
- 
+
 #include <fcntl.h>
 #include <stdio.h>
 
@@ -48,7 +48,7 @@
 #define PIXEL_FORMAT GGL_PIXEL_FORMAT_RGB_565
 #define PIXEL_SIZE   2
 #endif
- 
+
 #define NUM_BUFFERS 2
 
 typedef struct {
