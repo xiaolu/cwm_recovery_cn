@@ -103,6 +103,8 @@ handle_firmware_update(char* type, char* filename, ZipArchive* zip) {
     return INSTALL_SUCCESS;
 }
 
+static const char *LAST_INSTALL_FILE = "/cache/recovery/last_install";
+
 // If the package contains an update binary, extract it and run it.
 static int
 try_update_binary(const char *path, ZipArchive *zip) {
@@ -264,6 +266,12 @@ try_update_binary(const char *path, ZipArchive *zip) {
 //
 //  "{64,0xc926ad21,{1795090719,...,-695002876},{-857949815,...,1175080310}}"
 //
+// For key versions newer than the original 2048-bit e=3 keys
+// supported by Android, the string is preceded by a version
+// identifier, eg:
+//
+//  "v2 {64,0xc926ad21,{1795090719,...,-695002876},{-857949815,...,1175080310}}"
+//
 // (Note that the braces and commas in this example are actual
 // characters the parser expects to find in the file; the ellipses
 // indicate more numbers omitted from this example.)
@@ -283,31 +291,48 @@ load_keys(const char* filename, int* numKeys) {
         goto exit;
     }
 
-    int i;
-    bool done = false;
-    while (!done) {
-        ++*numKeys;
-        out = realloc(out, *numKeys * sizeof(RSAPublicKey));
-        RSAPublicKey* key = out + (*numKeys - 1);
-        if (fscanf(f, " { %i , 0x%x , { %u",
-                   &(key->len), &(key->n0inv), &(key->n[0])) != 3) {
-            goto exit;
-        }
-        if (key->len != RSANUMWORDS) {
-            LOGE("key length (%d) does not match expected size\n", key->len);
-            goto exit;
-        }
-        for (i = 1; i < key->len; ++i) {
-            if (fscanf(f, " , %u", &(key->n[i])) != 1) goto exit;
-        }
-        if (fscanf(f, " } , { %u", &(key->rr[0])) != 1) goto exit;
-        for (i = 1; i < key->len; ++i) {
-            if (fscanf(f, " , %u", &(key->rr[i])) != 1) goto exit;
-        }
-        fscanf(f, " } } ");
+    {
+        int i;
+        bool done = false;
+        while (!done) {
+            ++*numKeys;
+            out = (RSAPublicKey*)realloc(out, *numKeys * sizeof(RSAPublicKey));
+            RSAPublicKey* key = out + (*numKeys - 1);
 
-        // if the line ends in a comma, this file has more keys.
-        switch (fgetc(f)) {
+            char start_char;
+            if (fscanf(f, " %c", &start_char) != 1) goto exit;
+            if (start_char == '{') {
+                // a version 1 key has no version specifier.
+                key->exponent = 3;
+            } else if (start_char == 'v') {
+                int version;
+                if (fscanf(f, "%d {", &version) != 1) goto exit;
+                if (version == 2) {
+                    key->exponent = 65537;
+                } else {
+                    goto exit;
+                }
+            }
+
+            if (fscanf(f, " %i , 0x%x , { %u",
+                       &(key->len), &(key->n0inv), &(key->n[0])) != 3) {
+                goto exit;
+            }
+            if (key->len != RSANUMWORDS) {
+                LOGE("key length (%d) does not match expected size\n", key->len);
+                goto exit;
+            }
+            for (i = 1; i < key->len; ++i) {
+                if (fscanf(f, " , %u", &(key->n[i])) != 1) goto exit;
+            }
+            if (fscanf(f, " } , { %u", &(key->rr[0])) != 1) goto exit;
+            for (i = 1; i < key->len; ++i) {
+                if (fscanf(f, " , %u", &(key->rr[i])) != 1) goto exit;
+            }
+            fscanf(f, " } } ");
+
+            // if the line ends in a comma, this file has more keys.
+            switch (fgetc(f)) {
             case ',':
                 // more keys to come.
                 break;
@@ -319,6 +344,9 @@ load_keys(const char* filename, int* numKeys) {
             default:
                 LOGE("unexpected character between keys\n");
                 goto exit;
+            }
+
+            LOGI("read key e=%d\n", key->exponent);
         }
     }
 
@@ -332,8 +360,8 @@ exit:
     return NULL;
 }
 
-int
-install_package(const char *path)
+static int
+really_install_package(const char *path)
 {
     ui_set_background(BACKGROUND_ICON_INSTALLING);
     ui_print("Finding update package...\n");
@@ -369,7 +397,9 @@ install_package(const char *path)
         LOGI("verify_file returned %d\n", err);
         if (err != VERIFY_SUCCESS) {
             LOGE("signature verification failed\n");
-            return INSTALL_CORRUPT;
+            ui_show_text(1);
+            if (!confirm_selection("Install Untrusted Package?", "Yes - Install untrusted zip"))
+                return INSTALL_CORRUPT;
         }
     }
 
@@ -386,4 +416,24 @@ install_package(const char *path)
      */
     ui_print("Installing update...\n");
     return try_update_binary(path, &zip);
+}
+
+int
+install_package(const char* path)
+{
+    FILE* install_log = fopen_path(LAST_INSTALL_FILE, "w");
+    if (install_log) {
+        fputs(path, install_log);
+        fputc('\n', install_log);
+    } else {
+        LOGE("failed to open last_install: %s\n", strerror(errno));
+    }
+    int result = really_install_package(path);
+    if (install_log) {
+        fputc(result == INSTALL_SUCCESS ? '1' : '0', install_log);
+        fputc('\n', install_log);
+        fclose(install_log);
+        chmod(LAST_INSTALL_FILE, 0644);
+    }
+    return result;
 }

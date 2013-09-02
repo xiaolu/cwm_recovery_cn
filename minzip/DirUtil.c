@@ -54,7 +54,8 @@ getPathDirStatus(const char *path)
 
 int
 dirCreateHierarchy(const char *path, int mode,
-        const struct utimbuf *timestamp, bool stripFileName)
+        const struct utimbuf *timestamp, bool stripFileName,
+        struct selabel_handle *sehnd)
 {
     DirStatus ds;
 
@@ -144,7 +145,20 @@ dirCreateHierarchy(const char *path, int mode,
         } else if (ds == DMISSING) {
             int err;
 
+            char *secontext = NULL;
+
+            if (sehnd) {
+                selabel_lookup(sehnd, &secontext, cpath, mode);
+                setfscreatecon(secontext);
+            }
+
             err = mkdir(cpath, mode);
+
+            if (secontext) {
+                freecon(secontext);
+                setfscreatecon(NULL);
+            }
+
             if (err != 0) {
                 free(cpath);
                 return -1;

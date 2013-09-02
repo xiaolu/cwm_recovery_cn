@@ -14,6 +14,13 @@
 #include "Hash.h"
 #include "SysUtil.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <selinux/selinux.h>
+#include <selinux/label.h>
+
 /*
  * One entry in the Zip archive.  Treat this as opaque -- use accessors below.
  *
@@ -208,6 +215,11 @@ enum { MZ_EXTRACT_FILES_ONLY = 1, MZ_EXTRACT_DRY_RUN = 2 };
 bool mzExtractRecursive(const ZipArchive *pArchive,
         const char *zipDir, const char *targetDir,
         int flags, const struct utimbuf *timestamp,
-        void (*callback)(const char *fn, void*), void *cookie);
+        void (*callback)(const char *fn, void*), void *cookie,
+        struct selabel_handle *sehnd);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /*_MINZIP_ZIP*/

@@ -20,10 +20,15 @@
 #include <stdio.h>
 #include "minzip/Zip.h"
 
+#include <selinux/selinux.h>
+#include <selinux/label.h>
+
 typedef struct {
     FILE* cmd_pipe;
     ZipArchive* package_zip;
     int version;
 } UpdaterInfo;
+
+extern struct selabel_handle *sehandle;
 
 #endif

@@ -30,16 +30,28 @@
 #include "mtdutils/mtdutils.h"
 #include "edify/expr.h"
 
-static int SaveFileContents(const char* filename, FileContents file);
 static int LoadPartitionContents(const char* filename, FileContents* file);
-int ParseSha1(const char* str, uint8_t* digest);
 static ssize_t FileSink(unsigned char* data, ssize_t len, void* token);
+static int GenerateTarget(FileContents* source_file,
+                          const Value* source_patch_value,
+                          FileContents* copy_file,
+                          const Value* copy_patch_value,
+                          const char* source_filename,
+                          const char* target_filename,
+                          const uint8_t target_sha1[SHA_DIGEST_SIZE],
+                          size_t target_size,
+                          const Value* bonus_data);
 
 static int mtd_partitions_scanned = 0;
 
-// Read a file into memory; store it and its associated metadata in
-// *file.  Return 0 on success.
-int LoadFileContents(const char* filename, FileContents* file) {
+// Read a file into memory; optionally (retouch_flag == RETOUCH_DO_MASK) mask
+// the retouched entries back to their original value (such that SHA-1 checks
+// don't fail due to randomization); store the file contents and associated
+// metadata in *file.
+//
+// Return 0 on success.
+int LoadFileContents(const char* filename, FileContents* file,
+                     int retouch_flag) {
     file->data = NULL;
 
     // A special 'filename' beginning with "MTD:" or "EMMC:" means to
@@ -75,6 +87,20 @@ int LoadFileContents(const char* filename, FileContents* file) {
     }
     fclose(f);
 
+    // apply_patch[_check] functions are blind to randomization. Randomization
+    // is taken care of in [Undo]RetouchBinariesFn. If there is a mismatch
+    // within a file, this means the file is assumed "corrupt" for simplicity.
+    if (retouch_flag) {
+        int32_t desired_offset = 0;
+        if (retouch_mask_data(file->data, file->size,
+                              &desired_offset, NULL) != RETOUCH_DATA_MATCHED) {
+            printf("error trying to mask retouch entries\n");
+            free(file->data);
+            file->data = NULL;
+            return -1;
+        }
+    }
+
     SHA(file->data, file->size, file->sha1);
     return 0;
 }
@@ -92,11 +118,6 @@ static int compare_size_indices(const void* a, const void* b) {
     } else {
         return 0;
     }
-}
-
-void FreeFileContents(FileContents* file) {
-    if (file) free(file->data);
-    free(file);
 }
 
 // Load the contents of an MTD or EMMC partition into the provided
@@ -303,18 +324,18 @@ static int LoadPartitionContents(const char* filename, FileContents* file) {
 
 // Save the contents of the given FileContents object under the given
 // filename.  Return 0 on success.
-static int SaveFileContents(const char* filename, FileContents file) {
-    int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC);
+int SaveFileContents(const char* filename, const FileContents* file) {
+    int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
     if (fd < 0) {
         printf("failed to open \"%s\" for write: %s\n",
                filename, strerror(errno));
         return -1;
     }
 
-    ssize_t bytes_written = FileSink(file.data, file.size, &fd);
-    if (bytes_written != file.size) {
+    ssize_t bytes_written = FileSink(file->data, file->size, &fd);
+    if (bytes_written != file->size) {
         printf("short write of \"%s\" (%ld bytes of %ld) (%s)\n",
-               filename, (long)bytes_written, (long)file.size,
+               filename, (long)bytes_written, (long)file->size,
                strerror(errno));
         close(fd);
         return -1;
@@ -322,11 +343,11 @@ static int SaveFileContents(const char* filename, FileContents file) {
     fsync(fd);
     close(fd);
 
-    if (chmod(filename, file.st.st_mode) != 0) {
+    if (chmod(filename, file->st.st_mode) != 0) {
         printf("chmod of \"%s\" failed: %s\n", filename, strerror(errno));
         return -1;
     }
-    if (chown(filename, file.st.st_uid, file.st.st_gid) != 0) {
+    if (chown(filename, file->st.st_uid, file->st.st_gid) != 0) {
         printf("chown of \"%s\" failed: %s\n", filename, strerror(errno));
         return -1;
     }
@@ -452,7 +473,7 @@ int ParseSha1(const char* str, uint8_t* digest) {
 // Search an array of sha1 strings for one matching the given sha1.
 // Return the index of the match on success, or -1 if no match is
 // found.
-int FindMatchingPatch(uint8_t* sha1, char** const patch_sha1_str,
+int FindMatchingPatch(uint8_t* sha1, const char** patch_sha1_str,
                       int num_patches) {
     int i;
     uint8_t patch_sha1[SHA_DIGEST_SIZE];
@@ -477,13 +498,14 @@ int applypatch_check(const char* filename,
     // LoadFileContents is successful.  (Useful for reading
     // partitions, where the filename encodes the sha1s; no need to
     // check them twice.)
-    if (LoadFileContents(filename, &file) != 0 ||
+    if (LoadFileContents(filename, &file, RETOUCH_DO_MASK) != 0 ||
         (num_patches > 0 &&
          FindMatchingPatch(file.sha1, patch_sha1_str, num_patches) < 0)) {
         printf("file \"%s\" doesn't have any of expected "
                "sha1 sums; checking cache\n", filename);
 
         free(file.data);
+        file.data = NULL;
 
         // If the source file is missing or corrupted, it might be because
         // we were killed in the middle of patching it.  A copy of it
@@ -491,7 +513,7 @@ int applypatch_check(const char* filename,
         // exists and matches the sha1 we're looking for, the check still
         // passes.
 
-        if (LoadFileContents(CACHE_TEMP_SOURCE, &file) != 0) {
+        if (LoadFileContents(CACHE_TEMP_SOURCE, &file, RETOUCH_DO_MASK) != 0) {
             printf("failed to load cache file\n");
             return 1;
         }
@@ -596,7 +618,8 @@ int applypatch(const char* source_filename,
                size_t target_size,
                int num_patches,
                char** const patch_sha1_str,
-               Value** patch_data) {
+               Value** patch_data,
+               Value* bonus_data) {
     printf("\napplying patch to %s\n", source_filename);
 
     if (target_filename[0] == '-' &&
@@ -612,17 +635,20 @@ int applypatch(const char* source_filename,
 
     FileContents copy_file;
     FileContents source_file;
+    copy_file.data = NULL;
+    source_file.data = NULL;
     const Value* source_patch_value = NULL;
     const Value* copy_patch_value = NULL;
-    int made_copy = 0;
 
     // We try to load the target file into the source_file object.
-    if (LoadFileContents(target_filename, &source_file) == 0) {
+    if (LoadFileContents(target_filename, &source_file,
+                         RETOUCH_DO_MASK) == 0) {
         if (memcmp(source_file.sha1, target_sha1, SHA_DIGEST_SIZE) == 0) {
             // The early-exit case:  the patch was already applied, this file
             // has the desired hash, nothing for us to do.
             printf("\"%s\" is already target; no patch needed\n",
                    target_filename);
+            free(source_file.data);
             return 0;
         }
     }
@@ -633,7 +659,9 @@ int applypatch(const char* source_filename,
         // Need to load the source file:  either we failed to load the
         // target file, or we did but it's different from the source file.
         free(source_file.data);
-        LoadFileContents(source_filename, &source_file);
+        source_file.data = NULL;
+        LoadFileContents(source_filename, &source_file,
+                         RETOUCH_DO_MASK);
     }
 
     if (source_file.data != NULL) {
@@ -646,9 +674,11 @@ int applypatch(const char* source_filename,
 
     if (source_patch_value == NULL) {
         free(source_file.data);
+        source_file.data = NULL;
         printf("source file is bad; trying copy\n");
 
-        if (LoadFileContents(CACHE_TEMP_SOURCE, &copy_file) < 0) {
+        if (LoadFileContents(CACHE_TEMP_SOURCE, &copy_file,
+                             RETOUCH_DO_MASK) < 0) {
             // fail.
             printf("failed to read copy file\n");
             return 1;
@@ -663,16 +693,37 @@ int applypatch(const char* source_filename,
         if (copy_patch_value == NULL) {
             // fail.
             printf("copy file doesn't match source SHA-1s either\n");
+            free(copy_file.data);
             return 1;
         }
     }
 
+    int result = GenerateTarget(&source_file, source_patch_value,
+                                &copy_file, copy_patch_value,
+                                source_filename, target_filename,
+                                target_sha1, target_size, bonus_data);
+    free(source_file.data);
+    free(copy_file.data);
+
+    return result;
+}
+
+static int GenerateTarget(FileContents* source_file,
+                          const Value* source_patch_value,
+                          FileContents* copy_file,
+                          const Value* copy_patch_value,
+                          const char* source_filename,
+                          const char* target_filename,
+                          const uint8_t target_sha1[SHA_DIGEST_SIZE],
+                          size_t target_size,
+                          const Value* bonus_data) {
     int retry = 1;
     SHA_CTX ctx;
     int output;
     MemorySinkInfo msi;
     FileContents* source_to_use;
     char* outname;
+    int made_copy = 0;
 
     // assume that target_filename (eg "/system/app/Foo.apk") is located
     // on the same filesystem as its top-level directory ("/system").
@@ -701,7 +752,7 @@ int applypatch(const char* source_filename,
 
             // We still write the original source to cache, in case
             // the partition write is interrupted.
-            if (MakeFreeSpaceOnCache(source_file.size) < 0) {
+            if (MakeFreeSpaceOnCache(source_file->size) < 0) {
                 printf("not enough free space on /cache\n");
                 return 1;
             }
@@ -741,7 +792,7 @@ int applypatch(const char* source_filename,
                     return 1;
                 }
 
-                if (MakeFreeSpaceOnCache(source_file.size) < 0) {
+                if (MakeFreeSpaceOnCache(source_file->size) < 0) {
                     printf("not enough free space on /cache\n");
                     return 1;
                 }
@@ -760,10 +811,10 @@ int applypatch(const char* source_filename,
 
         const Value* patch;
         if (source_patch_value != NULL) {
-            source_to_use = &source_file;
+            source_to_use = source_file;
             patch = source_patch_value;
         } else {
-            source_to_use = &copy_file;
+            source_to_use = copy_file;
             patch = copy_patch_value;
         }
 
@@ -795,7 +846,7 @@ int applypatch(const char* source_filename,
             strcpy(outname, target_filename);
             strcat(outname, ".patch");
 
-            output = open(outname, O_WRONLY | O_CREAT | O_TRUNC);
+            output = open(outname, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
             if (output < 0) {
                 printf("failed to open output file %s: %s\n",
                        outname, strerror(errno));
@@ -819,7 +870,7 @@ int applypatch(const char* source_filename,
         } else if (header_bytes_read >= 8 &&
                    memcmp(header, "IMGDIFF2", 8) == 0) {
             result = ApplyImagePatch(source_to_use->data, source_to_use->size,
-                                     patch, sink, token, &ctx);
+                                     patch, sink, token, &ctx, bonus_data);
         } else {
             printf("Unknown patch file format\n");
             return 1;

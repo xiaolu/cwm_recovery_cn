@@ -1,6 +1,3 @@
-ifneq ($(TARGET_SIMULATOR),true)
-ifeq ($(TARGET_ARCH),arm)
-
 LOCAL_PATH := $(call my-dir)
 include $(CLEAR_VARS)
 
@@ -12,16 +9,18 @@ LOCAL_SRC_FILES := \
     bootloader.c \
     install.c \
     roots.c \
-    ui.c \
-    verifier.c \
-    encryptedfs_provisioning.c \
+    ui_touch.c \
     mounts.c \
     extendedcommands.c \
     nandroid.c \
     ../../system/core/toolbox/reboot.c \
+    ../../system/core/toolbox/dynarray.c \
     firmware.c \
     edifyscripting.c \
-    setprop.c
+    prop.c \
+    default_recovery_ui.c \
+    adb_install.c \
+    verifier.c
 
 ADDITIONAL_RECOVERY_FILES := $(shell echo $$ADDITIONAL_RECOVERY_FILES)
 LOCAL_SRC_FILES += $(ADDITIONAL_RECOVERY_FILES)
@@ -34,22 +33,45 @@ ifdef I_AM_KOUSH
 RECOVERY_NAME := ClockworkMod Recovery
 LOCAL_CFLAGS += -DI_AM_KOUSH
 else
+ifndef RECOVERY_NAME
 RECOVERY_NAME := CWM-based Recovery
 endif
+endif
 
-RECOVERY_VERSION := $(RECOVERY_NAME) v5.0.2.8
+RECOVERY_VERSION := $(RECOVERY_NAME) v6.0.3.6
 
 LOCAL_CFLAGS += -DRECOVERY_VERSION="$(RECOVERY_VERSION)"
 RECOVERY_API_VERSION := 2
 LOCAL_CFLAGS += -DRECOVERY_API_VERSION=$(RECOVERY_API_VERSION)
 
-BOARD_RECOVERY_DEFINES := BOARD_HAS_NO_SELECT_BUTTON BOARD_HAS_SMALL_RECOVERY BOARD_LDPI_RECOVERY BOARD_UMS_LUNFILE BOARD_RECOVERY_ALWAYS_WIPES BOARD_RECOVERY_HANDLES_MOUNT
+ifdef BOARD_TOUCH_RECOVERY
+ifeq ($(BOARD_USE_CUSTOM_RECOVERY_FONT),)
+  BOARD_USE_CUSTOM_RECOVERY_FONT := \"roboto_15x24.h\"
+endif
+endif
+
+ifeq ($(BOARD_USE_CUSTOM_RECOVERY_FONT),)
+  BOARD_USE_CUSTOM_RECOVERY_FONT := \"font_10x18.h\"
+endif
+
+BOARD_RECOVERY_CHAR_WIDTH := $(shell echo $(BOARD_USE_CUSTOM_RECOVERY_FONT) | cut -d _  -f 2 | cut -d . -f 1 | cut -d x -f 1)
+BOARD_RECOVERY_CHAR_HEIGHT := $(shell echo $(BOARD_USE_CUSTOM_RECOVERY_FONT) | cut -d _  -f 2 | cut -d . -f 1 | cut -d x -f 2)
+RECOVERY_BUILD_DATE := $(shell date +"%Y%m%d")
+LOCAL_CFLAGS += -DBOARD_RECOVERY_CHAR_WIDTH=$(BOARD_RECOVERY_CHAR_WIDTH) -DBOARD_RECOVERY_CHAR_HEIGHT=$(BOARD_RECOVERY_CHAR_HEIGHT) -DRECOVERY_BUILD_DATE="$(RECOVERY_BUILD_DATE)"
+
+BOARD_RECOVERY_DEFINES := BOARD_HAS_NO_SELECT_BUTTON BOARD_UMS_LUNFILE BOARD_RECOVERY_ALWAYS_WIPES BOARD_RECOVERY_HANDLES_MOUNT BOARD_TOUCH_RECOVERY RECOVERY_EXTEND_NANDROID_MENU TARGET_USE_CUSTOM_LUN_FILE_PATH TARGET_DEVICE
 
 $(foreach board_define,$(BOARD_RECOVERY_DEFINES), \
   $(if $($(board_define)), \
     $(eval LOCAL_CFLAGS += -D$(board_define)=\"$($(board_define))\") \
   ) \
   )
+
+LOCAL_STATIC_LIBRARIES :=
+
+LOCAL_CFLAGS += -DUSE_EXT4
+LOCAL_C_INCLUDES += system/extras/ext4_utils
+LOCAL_STATIC_LIBRARIES += libext4_utils_static libz libsparse_static
 
 # This binary is in the recovery ramdisk, which is otherwise a copy of root.
 # It gets copied there in config/Makefile.  LOCAL_MODULE_TAGS suppresses
@@ -58,20 +80,18 @@ $(foreach board_define,$(BOARD_RECOVERY_DEFINES), \
 
 LOCAL_MODULE_TAGS := eng
 
-LOCAL_STATIC_LIBRARIES :=
 ifeq ($(BOARD_CUSTOM_RECOVERY_KEYMAPPING),)
-  LOCAL_SRC_FILES += default_recovery_ui.c
+  LOCAL_SRC_FILES += default_recovery_keys.c
 else
   LOCAL_SRC_FILES += $(BOARD_CUSTOM_RECOVERY_KEYMAPPING)
 endif
 
-LOCAL_STATIC_LIBRARIES += librebootrecovery
-LOCAL_STATIC_LIBRARIES += libext4_utils libz
+LOCAL_STATIC_LIBRARIES += libmake_ext4fs libext4_utils_static libz libsparse_static
 LOCAL_STATIC_LIBRARIES += libminzip libunz libmincrypt
 
-LOCAL_STATIC_LIBRARIES += libedify libbusybox libclearsilverregex libmkyaffs2image libunyaffs liberase_image libdump_image libflash_image
+LOCAL_STATIC_LIBRARIES += libminizip libminadbd libedify libbusybox libmkyaffs2image libunyaffs liberase_image libdump_image libflash_image
 
-LOCAL_STATIC_LIBRARIES += libcrecovery libflashutils libmtdutils libmmcutils libbmlutils 
+LOCAL_STATIC_LIBRARIES += libdedupe libcrypto_static libcrecovery libflashutils libmtdutils libmmcutils libbmlutils
 
 ifeq ($(BOARD_USES_BML_OVER_MTD),true)
 LOCAL_STATIC_LIBRARIES += libbml_over_mtd
@@ -80,11 +100,13 @@ endif
 LOCAL_STATIC_LIBRARIES += libminui libpixelflinger_static libpng libcutils
 LOCAL_STATIC_LIBRARIES += libstdc++ libc
 
+LOCAL_STATIC_LIBRARIES += libselinux
+
 LOCAL_C_INCLUDES += system/extras/ext4_utils
 
 include $(BUILD_EXECUTABLE)
 
-RECOVERY_LINKS := edify busybox flash_image dump_image mkyaffs2image unyaffs erase_image nandroid reboot volume setprop
+RECOVERY_LINKS := bu make_ext4fs edify busybox flash_image dump_image mkyaffs2image unyaffs erase_image nandroid reboot volume setprop getprop dedupe minizip
 
 # nc is provided by external/netcat
 RECOVERY_SYMLINKS := $(addprefix $(TARGET_RECOVERY_ROOT_OUT)/sbin/,$(RECOVERY_LINKS))
@@ -99,12 +121,7 @@ ALL_DEFAULT_INSTALLED_MODULES += $(RECOVERY_SYMLINKS)
 
 # Now let's do recovery symlinks
 BUSYBOX_LINKS := $(shell cat external/busybox/busybox-minimal.links)
-ifndef BOARD_HAS_SMALL_RECOVERY
-exclude := tune2fs
-ifeq ($(BOARD_HAS_LARGE_FILESYSTEM),true)
-exclude += mke2fs
-endif
-endif
+exclude := tune2fs mke2fs
 RECOVERY_BUSYBOX_SYMLINKS := $(addprefix $(TARGET_RECOVERY_ROOT_OUT)/sbin/,$(filter-out $(exclude),$(notdir $(BUSYBOX_LINKS))))
 $(RECOVERY_BUSYBOX_SYMLINKS): BUSYBOX_BINARY := busybox
 $(RECOVERY_BUSYBOX_SYMLINKS): $(LOCAL_INSTALLED_MODULE)
@@ -113,11 +130,11 @@ $(RECOVERY_BUSYBOX_SYMLINKS): $(LOCAL_INSTALLED_MODULE)
 	@rm -rf $@
 	$(hide) ln -sf $(BUSYBOX_BINARY) $@
 
-ALL_DEFAULT_INSTALLED_MODULES += $(RECOVERY_BUSYBOX_SYMLINKS)
+ALL_DEFAULT_INSTALLED_MODULES += $(RECOVERY_BUSYBOX_SYMLINKS) 
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := nandroid-md5.sh
-LOCAL_MODULE_TAGS := eng
+LOCAL_MODULE_TAGS := optional
 LOCAL_MODULE_CLASS := RECOVERY_EXECUTABLES
 LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/sbin
 LOCAL_SRC_FILES := nandroid-md5.sh
@@ -125,7 +142,7 @@ include $(BUILD_PREBUILT)
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := killrecovery.sh
-LOCAL_MODULE_TAGS := eng
+LOCAL_MODULE_TAGS := optional
 LOCAL_MODULE_CLASS := RECOVERY_EXECUTABLES
 LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/sbin
 LOCAL_SRC_FILES := killrecovery.sh
@@ -145,13 +162,14 @@ LOCAL_STATIC_LIBRARIES := libmincrypt libcutils libstdc++ libc
 
 include $(BUILD_EXECUTABLE)
 
-include $(commands_recovery_local_path)/dedupe/Android.mk
-
 include $(commands_recovery_local_path)/bmlutils/Android.mk
+include $(commands_recovery_local_path)/dedupe/Android.mk
 include $(commands_recovery_local_path)/flashutils/Android.mk
 include $(commands_recovery_local_path)/libcrecovery/Android.mk
 include $(commands_recovery_local_path)/minui/Android.mk
+include $(commands_recovery_local_path)/minelf/Android.mk
 include $(commands_recovery_local_path)/minzip/Android.mk
+include $(commands_recovery_local_path)/minadbd/Android.mk
 include $(commands_recovery_local_path)/mtdutils/Android.mk
 include $(commands_recovery_local_path)/mmcutils/Android.mk
 include $(commands_recovery_local_path)/tools/Android.mk
@@ -159,8 +177,6 @@ include $(commands_recovery_local_path)/edify/Android.mk
 include $(commands_recovery_local_path)/updater/Android.mk
 include $(commands_recovery_local_path)/applypatch/Android.mk
 include $(commands_recovery_local_path)/utilities/Android.mk
+include $(commands_recovery_local_path)/su/Android.mk
+include $(commands_recovery_local_path)/fb2png/Android.mk
 commands_recovery_local_path :=
-
-endif   # TARGET_ARCH == arm
-endif    # !TARGET_SIMULATOR
-

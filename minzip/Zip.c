@@ -930,7 +930,8 @@ static const char *targetEntryPath(MzPathHelper *helper, ZipEntry *pEntry)
 bool mzExtractRecursive(const ZipArchive *pArchive,
                         const char *zipDir, const char *targetDir,
                         int flags, const struct utimbuf *timestamp,
-                        void (*callback)(const char *fn, void *), void *cookie)
+                        void (*callback)(const char *fn, void *), void *cookie,
+                        struct selabel_handle *sehnd)
 {
     if (zipDir[0] == '/') {
         LOGE("mzExtractRecursive(): zipDir must be a relative path.\n");
@@ -1045,7 +1046,7 @@ bool mzExtractRecursive(const ZipArchive *pArchive,
         if (pEntry->fileName[pEntry->fileNameLen-1] == '/') {
             if (!(flags & MZ_EXTRACT_FILES_ONLY)) {
                 int ret = dirCreateHierarchy(
-                        targetFile, UNZIP_DIRMODE, timestamp, false);
+                        targetFile, UNZIP_DIRMODE, timestamp, false, sehnd);
                 if (ret != 0) {
                     LOGE("Can't create containing directory for \"%s\": %s\n",
                             targetFile, strerror(errno));
@@ -1059,7 +1060,7 @@ bool mzExtractRecursive(const ZipArchive *pArchive,
              * the containing directory exists.
              */
             int ret = dirCreateHierarchy(
-                    targetFile, UNZIP_DIRMODE, timestamp, true);
+                    targetFile, UNZIP_DIRMODE, timestamp, true, sehnd);
             if (ret != 0) {
                 LOGE("Can't create containing directory for \"%s\": %s\n",
                         targetFile, strerror(errno));
@@ -1113,7 +1114,21 @@ bool mzExtractRecursive(const ZipArchive *pArchive,
                 /* The entry is a regular file.
                  * Open the target for writing.
                  */
+
+                char *secontext = NULL;
+
+                if (sehnd) {
+                    selabel_lookup(sehnd, &secontext, targetFile, UNZIP_FILEMODE);
+                    setfscreatecon(secontext);
+                }
+
                 int fd = creat(targetFile, UNZIP_FILEMODE);
+
+                if (secontext) {
+                    freecon(secontext);
+                    setfscreatecon(NULL);
+                }
+
                 if (fd < 0) {
                     LOGE("Can't create target file \"%s\": %s\n",
                             targetFile, strerror(errno));

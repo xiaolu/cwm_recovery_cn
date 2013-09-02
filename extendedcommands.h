@@ -2,10 +2,10 @@ extern int signature_check_enabled;
 extern int script_assert_enabled;
 
 void
-toggle_signature_check();
+write_recovery_version();
 
 void
-toggle_script_asserts();
+toggle_signature_check();
 
 void
 show_choose_zip_menu();
@@ -60,3 +60,10 @@ void show_install_update_menu();
 int confirm_selection(const char* title, const char* confirm);
 
 int run_and_remove_extendedcommand();
+
+int verify_root_and_recovery();
+
+#ifdef RECOVERY_EXTEND_NANDROID_MENU
+void extend_nandroid_menu(char** items, int item_count, int max_items);
+void handle_nandroid_menu(int item_count, int selected);
+#endif

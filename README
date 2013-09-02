@@ -1,3 +1,0 @@
-Clockworkmod recovery 5.0.2.8 Chinese font support(Most updates in the minui folder).
-Config:
-RECOVERY_USE_CHINESE_FONT := true

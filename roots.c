@@ -56,6 +56,30 @@ static char* dupe_string(const char* sz) {
     return strdup(sz);
 }
 
+static int parse_options(char* options, Volume* volume) {
+    char* option;
+    while (option = strtok(options, ",")) {
+        options = NULL;
+
+        if (strncmp(option, "length=", 7) == 0) {
+            volume->length = strtoll(option+7, NULL, 10);
+        } else if (strncmp(option, "fstype2=", 8) == 0) {
+            volume->fs_type2 = volume->fs_type;
+            volume->fs_type = strdup(option + 8);
+        } else if (strncmp(option, "fs_options=", 11) == 0) {
+            volume->fs_options = strdup(option + 11);
+        } else if (strncmp(option, "fs_options2=", 12) == 0) {
+            volume->fs_options2 = strdup(option + 12);
+        } else if (strncmp(option, "lun=", 4) == 0) {
+            volume->lun = strdup(option + 4);
+        } else {
+            LOGE("bad option \"%s\"\n", option);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 void load_volume_table() {
     int alloc = 2;
     device_volumes = malloc(alloc * sizeof(Volume));
@@ -65,8 +89,11 @@ void load_volume_table() {
     device_volumes[0].fs_type = "ramdisk";
     device_volumes[0].device = NULL;
     device_volumes[0].device2 = NULL;
+    device_volumes[0].fs_type2 = NULL;
     device_volumes[0].fs_options = NULL;
     device_volumes[0].fs_options2 = NULL;
+    device_volumes[0].lun = NULL;
+    device_volumes[0].length = 0;
     num_volumes = 1;
 
     FILE* fstab = fopen("/etc/recovery.fstab", "r");
@@ -88,10 +115,16 @@ void load_volume_table() {
         char* device = strtok(NULL, " \t\n");
         // lines may optionally have a second device, to use if
         // mounting the first one fails.
+        char* options = NULL;
         char* device2 = strtok(NULL, " \t\n");
-        char* fs_type2 = strtok(NULL, " \t\n");
-        char* fs_options = strtok(NULL, " \t\n");
-        char* fs_options2 = strtok(NULL, " \t\n");
+        if (device2) {
+            if (device2[0] == '/') {
+                options = strtok(NULL, " \t\n");
+            } else {
+                options = device2;
+                device2 = NULL;
+            }
+        }
 
         if (mount_point && fs_type && device) {
             while (num_volumes >= alloc) {
@@ -99,21 +132,23 @@ void load_volume_table() {
                 device_volumes = realloc(device_volumes, alloc*sizeof(Volume));
             }
             device_volumes[num_volumes].mount_point = strdup(mount_point);
-            device_volumes[num_volumes].fs_type = !is_null(fs_type2) ? strdup(fs_type2) : strdup(fs_type);
+            device_volumes[num_volumes].fs_type = strdup(fs_type);
             device_volumes[num_volumes].device = strdup(device);
             device_volumes[num_volumes].device2 =
-                !is_null(device2) ? strdup(device2) : NULL;
-            device_volumes[num_volumes].fs_type2 = !is_null(fs_type2) ? strdup(fs_type) : NULL;
+                device2 ? strdup(device2) : NULL;
 
-            if (!is_null(fs_type2)) {
-                device_volumes[num_volumes].fs_options2 = dupe_string(fs_options);
-                device_volumes[num_volumes].fs_options = dupe_string(fs_options2);
+            device_volumes[num_volumes].length = 0;
+
+            device_volumes[num_volumes].fs_type2 = NULL;
+            device_volumes[num_volumes].fs_options = NULL;
+            device_volumes[num_volumes].fs_options2 = NULL;
+            device_volumes[num_volumes].lun = NULL;
+
+            if (parse_options(options, device_volumes + num_volumes) != 0) {
+                LOGE("skipping malformed recovery.fstab line: %s\n", original);
+            } else {
+                ++num_volumes;
             }
-            else {
-                device_volumes[num_volumes].fs_options2 = NULL;
-                device_volumes[num_volumes].fs_options = dupe_string(fs_options);
-            }
-            ++num_volumes;
         } else {
             LOGE("skipping malformed recovery.fstab line: %s\n", original);
         }
@@ -122,14 +157,14 @@ void load_volume_table() {
 
     fclose(fstab);
 
-    printf("recovery filesystem table\n");
-    printf("=========================\n");
+    fprintf(stderr, "recovery filesystem table\n");
+    fprintf(stderr, "=========================\n");
     for (i = 0; i < num_volumes; ++i) {
         Volume* v = &device_volumes[i];
-        printf("  %d %s %s %s %s\n", i, v->mount_point, v->fs_type,
-               v->device, v->device2);
+        fprintf(stderr, "  %d %s %s %s %s %lld\n", i, v->mount_point, v->fs_type,
+               v->device, v->device2, v->length);
     }
-    printf("\n");
+    fprintf(stderr,"\n");
 }
 
 Volume* volume_for_path(const char* path) {
@@ -164,15 +199,74 @@ int try_mount(const char* device, const char* mount_point, const char* fs_type, 
     return ret;
 }
 
-int is_data_media() {
-    Volume *data = volume_for_path("/data");
-    return data != NULL && strcmp(data->fs_type, "auto") == 0 && volume_for_path("/sdcard") == NULL;
+int use_migrated_storage() {
+    const MountedVolume* mv =
+        find_mounted_volume_by_mount_point("/data");
+    if (ensure_path_mounted("/data") != 0)
+        return 0;
+	char get_version[255];
+    property_get("persist.sys.android.version", get_version, "");
+    struct stat s;
+	return strncmp(get_version,"4.2",3) >= 0 && 
+			lstat("/data/media/0", &s) == 0;
+	if (!mv) {
+		handle_data_media_format(1);
+		ensure_path_unmounted("/data");
+		handle_data_media_format(0);
+	}
 }
 
+int is_data_media() {
+    int i;
+    for (i = 0; i < num_volumes; i++) {
+        Volume* vol = device_volumes + i;
+        if (strcmp(vol->fs_type, "datamedia") == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/*
 void setup_data_media() {
-    rmdir("/sdcard");
-    mkdir("/data/media", 0755);
-    symlink("/data/media", "/sdcard");
+    int i;
+    for (i = 0; i < num_volumes; i++) {
+        Volume* vol = device_volumes + i;
+        if (strcmp(vol->fs_type, "datamedia") == 0) {
+            rmdir(vol->mount_point);
+            mkdir("/data/media", 0755);
+            symlink("/data/media", vol->mount_point);
+            return;
+        }
+    }
+}
+*/
+void setup_data_media() {
+    int i;
+    for (i = 0; i < num_volumes; i++) {
+        Volume* vol = device_volumes + i;
+        if (strcmp(vol->fs_type, "datamedia") == 0) {
+            // support /data/media/0
+            char path[15];
+            if (use_migrated_storage())
+                sprintf(path, "/data/media/0");
+            else sprintf(path, "/data/media");
+
+            LOGI("using %s for %s\n", path, vol->mount_point);
+             // handle directory on start (probably useless) and then symlink on live toggle
+            if (rmdir(vol->mount_point) != 0) {
+                if (remove(vol->mount_point) != 0)
+                    LOGE("Could not apply settings! Please reboot so that they can take effect.\n");
+            }
+            mkdir(path, 0755);
+            symlink(path, vol->mount_point);
+            return;
+        }
+    }
+}
+
+int is_data_media_volume_path(const char* path) {
+    Volume* v = volume_for_path(path);
+    return strcmp(v->fs_type, "datamedia") == 0;
 }
 
 int ensure_path_mounted(const char* path) {
@@ -182,17 +276,20 @@ int ensure_path_mounted(const char* path) {
 int ensure_path_mounted_at_mount_point(const char* path, const char* mount_point) {
     Volume* v = volume_for_path(path);
     if (v == NULL) {
-        // no /sdcard? let's assume /data/media
-        if (strstr(path, "/sdcard") == path && is_data_media()) {
-            LOGW("using /data/media, no /sdcard found.\n");
-            int ret;
-            if (0 != (ret = ensure_path_mounted("/data")))
-                return ret;
-            setup_data_media();
-            return 0;
-        }
-        LOGE("unknown volume for path [%s]\n", path);
+        LOGW("unknown volume for path [%s]\n", path);
         return -1;
+    }
+    if (is_data_media_volume_path(path)) {
+        if (ui_should_log_stdout()) {
+            if (use_migrated_storage())
+			    LOGI("using /data/media/0 for %s.\n", path);
+		    else LOGI("using /data/media for %s.\n", path);
+        }
+        int ret;
+        if (0 != (ret = ensure_path_mounted("/data")))
+            return ret;
+        setup_data_media();
+        return 0;
     }
     if (strcmp(v->fs_type, "ramdisk") == 0) {
         // the ramdisk is always mounted.
@@ -245,28 +342,32 @@ int ensure_path_mounted_at_mount_point(const char* path, const char* mount_point
     } else {
         // let's try mounting with the mount binary and hope for the best.
         char mount_cmd[PATH_MAX];
-        sprintf(mount_cmd, "mount %s", path);
+        // case called by ensure_path_mounted_at_mount_point("/emmc", "/sdcard") in edifyscripting.c
+        // for sdcard marker check on devices where /sdcard is external storage
+        if (strcmp(v->mount_point, mount_point) != 0)
+            sprintf(mount_cmd, "mount %s %s", v->device, mount_point);
+        else
+            sprintf(mount_cmd, "mount %s", mount_point);
         return __system(mount_cmd);
     }
 
     LOGE("unknown fs_type \"%s\" for %s\n", v->fs_type, mount_point);
     return -1;
 }
-
+static int handle_data_media = 0;
 int ensure_path_unmounted(const char* path) {
     // if we are using /data/media, do not ever unmount volumes /data or /sdcard
-    if (volume_for_path("/sdcard") == NULL && (strstr(path, "/sdcard") == path || strstr(path, "/data") == path)) {
+    if (strstr(path, "/data") == path && is_data_media() && !handle_data_media) {
         return 0;
     }
 
     Volume* v = volume_for_path(path);
     if (v == NULL) {
-        // no /sdcard? let's assume /data/media
-        if (strstr(path, "/sdcard") == path && is_data_media()) {
-            return ensure_path_unmounted("/data");
-        }
         LOGE("unknown volume for path [%s]\n", path);
         return -1;
+    }
+    if (is_data_media_volume_path(path)) {
+        return ensure_path_unmounted("/data");
     }
     if (strcmp(v->fs_type, "ramdisk") == 0) {
         // the ramdisk is always mounted; you can't unmount it.
@@ -290,18 +391,24 @@ int ensure_path_unmounted(const char* path) {
     return unmount_mounted_volume(mv);
 }
 
+extern struct selabel_handle *sehandle;
+
 int format_volume(const char* volume) {
     Volume* v = volume_for_path(volume);
     if (v == NULL) {
-        // no /sdcard? let's assume /data/media
-        if (strstr(volume, "/sdcard") == volume && is_data_media()) {
-            return format_unknown_device(NULL, volume, NULL);
-        }
         // silent failure for sd-ext
         if (strcmp(volume, "/sd-ext") == 0)
             return -1;
         LOGE("unknown volume \"%s\"\n", volume);
         return -1;
+    }
+    if (is_data_media_volume_path(volume)) {
+        return format_unknown_device(NULL, volume, NULL);
+    }
+    // check to see if /data is being formatted, and if it is /data/media
+    // Note: the /sdcard check is redundant probably, just being safe.
+    if (strstr(volume, "/data") == volume && is_data_media() && !handle_data_media) {
+        return format_unknown_device(NULL, volume, NULL);
     }
     if (strcmp(v->fs_type, "ramdisk") == 0) {
         // you can't format the ramdisk.
@@ -345,19 +452,18 @@ int format_volume(const char* volume) {
     }
 
     if (strcmp(v->fs_type, "ext4") == 0) {
-	char ext4_cmd[PATH_MAX];
-	sprintf(ext4_cmd, "/sbin/mke2fs -T ext4 -b 4096 -m 0 -F %s", v->device);
+		char ext4_cmd[PATH_MAX];
+		sprintf(ext4_cmd, "/sbin/mke2fs -T ext4 -b 4096 -m 0 -F %s", v->device);
         int ret = __system(ext4_cmd);
-	if (ret != 0) {
-		ui_print("use make_extf4fs format %s.\n", v->device);
-	        reset_ext4fs_info();
-        	ret = make_ext4fs(v->device, NULL, NULL, 0, 0, 0);
 		if (ret != 0) {
+			ui_print("use make_extf4fs format %s.\n", v->device);
+        	ret = make_ext4fs(v->device, v->length, volume, sehandle);
+			if (ret != 0) {
         	    LOGE("format_volume: make_extf4fs failed on %s\n", v->device);
         	    return -1;
         	}        	
-	}
-	return 0;
+		}
+		return 0;
     }
 
 #if 0
@@ -365,4 +471,8 @@ int format_volume(const char* volume) {
     return -1;
 #endif
     return format_unknown_device(v->device, volume, v->fs_type);
+}
+
+void handle_data_media_format(int handle) {
+  handle_data_media = handle;
 }

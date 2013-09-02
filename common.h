@@ -23,9 +23,11 @@
 void ui_init();
 
 // Use KEY_* codes from <linux/input.h> or KEY_DREAM_* from "minui/minui.h".
+void ui_cancel_wait_key();
 int ui_wait_key();            // waits for a key/button press, returns the code
 int ui_key_pressed(int key);  // returns >0 if the code is currently pressed
 int ui_text_visible();        // returns >0 if text log is currently visible
+int ui_text_ever_visible();   // returns >0 if text log was ever visible
 void ui_show_text(int visible);
 void ui_clear_key_queue();
 
@@ -35,8 +37,13 @@ void ui_clear_key_queue();
 void ui_print(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void ui_printlogtail(int nb_lines);
 
-void ui_reset_text_col();
+void ui_delete_line();
 void ui_set_show_text(int value);
+void ui_set_nice(int enabled);
+#define ui_nice_print(...) { ui_set_nice(1); ui_print(__VA_ARGS__); ui_set_nice(0); }
+int ui_was_niced();
+int ui_get_text_cols();
+void ui_increment_frame();
 
 // Display some header text followed by a menu of items, which appears
 // at the top of the screen (in place of any scrolling ui_print()
@@ -58,6 +65,7 @@ enum {
   BACKGROUND_ICON_INSTALLING,
   BACKGROUND_ICON_ERROR,
   BACKGROUND_ICON_CLOCKWORK,
+  BACKGROUND_ICON_CID,
   BACKGROUND_ICON_FIRMWARE_INSTALLING,
   BACKGROUND_ICON_FIRMWARE_ERROR,
   NUM_BACKGROUND_ICONS
@@ -113,11 +121,46 @@ typedef struct {
     const char* device2;      // alternative device to try if fs_type
                               // == "ext4" or "vfat" and mounting
                               // 'device' fails
+
+    long long length;         // (ext4 partition only) when
+                              // formatting, size to use for the
+                              // partition.  0 or negative number
+                              // means to format all but the last
+                              // (that much).
+
     const char* fs_type2;
 
     const char* fs_options;
 
     const char* fs_options2;
+
+    const char* lun;          // (/sdcard, /emmc, /external_sd only) LUN file to
+                              // use when mounting via USB mass storage
 } Volume;
+
+typedef struct {
+    // number of frames in indeterminate progress bar animation
+    int indeterminate_frames;
+
+    // number of frames per second to try to maintain when animating
+    int update_fps;
+
+    // number of frames in installing animation.  may be zero for a
+    // static installation icon.
+    int installing_frames;
+
+    // the install icon is animated by drawing images containing the
+    // changing part over the base icon.  These specify the
+    // coordinates of the upper-left corner.
+    int install_overlay_offset_x;
+    int install_overlay_offset_y;
+
+} UIParameters;
+
+// fopen a file, mounting volumes and making parent dirs as necessary.
+FILE* fopen_path(const char *path, const char *mode);
+
+int ui_get_selected_item();
+int ui_is_showing_back_button();
 
 #endif  // RECOVERY_COMMON_H
